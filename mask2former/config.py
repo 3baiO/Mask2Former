@@ -112,3 +112,12 @@ def add_maskformer2_config(cfg):
     # Importance sampling parameter for PointRend point sampling during training. Parametr `beta` in
     # the original paper.
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
+
+    # boundary-aware enhancement config
+    cfg.MODEL.BOUNDARY_AWARE = CN()
+    cfg.MODEL.BOUNDARY_AWARE.ENABLED = False
+    # Toggle BEFBM fusion after transformer encoder feature extraction.
+    cfg.MODEL.BOUNDARY_AWARE.BEFBM_ENABLED = True
+    # lambda3 in the final objective: L = lambda1 * L_cls + lambda2 * L_mask + lambda3 * L_edge
+    cfg.MODEL.BOUNDARY_AWARE.EDGE_LOSS_WEIGHT = 1.0
+    cfg.MODEL.BOUNDARY_AWARE.SOBEL_EPS = 1e-6

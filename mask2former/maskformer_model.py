@@ -124,6 +124,9 @@ class MaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
+        if cfg.MODEL.BOUNDARY_AWARE.ENABLED:
+            weight_dict["loss_edge"] = cfg.MODEL.BOUNDARY_AWARE.EDGE_LOSS_WEIGHT
+
         losses = ["labels", "masks"]
 
         criterion = SetCriterion(
@@ -195,7 +198,10 @@ class MaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
+        outputs = self.sem_seg_head(
+            features,
+            input_images=(images.tensor * self.pixel_std + self.pixel_mean) if self.training else None,
+        )
 
         if self.training:
             # mask classification target

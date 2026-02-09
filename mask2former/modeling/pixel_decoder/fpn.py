@@ -122,6 +122,10 @@ class BasePixelDecoder(nn.Module):
 
         self.maskformer_num_feature_levels = 3  # always use 3 scales
 
+    def get_boundary_loss_inputs(self):
+        # Pixel decoders without boundary-aware branches return no extra loss inputs.
+        return None
+
     @classmethod
     def from_config(cls, cfg, input_shape: Dict[str, ShapeSpec]):
         ret = {}
@@ -133,7 +137,8 @@ class BasePixelDecoder(nn.Module):
         ret["norm"] = cfg.MODEL.SEM_SEG_HEAD.NORM
         return ret
 
-    def forward_features(self, features):
+    def forward_features(self, features, input_images=None):
+        del input_images
         multi_scale_features = []
         num_cur_levels = 0
         # Reverse feature maps into top-down order (from low to high resolution)
@@ -281,7 +286,8 @@ class TransformerEncoderPixelDecoder(BasePixelDecoder):
         ret["transformer_pre_norm"] = cfg.MODEL.MASK_FORMER.PRE_NORM
         return ret
 
-    def forward_features(self, features):
+    def forward_features(self, features, input_images=None):
+        del input_images
         multi_scale_features = []
         num_cur_levels = 0
         # Reverse feature maps into top-down order (from low to high resolution)

@@ -112,11 +112,13 @@ class MaskFormerHead(nn.Module):
             ),
         }
 
-    def forward(self, features, mask=None):
-        return self.layers(features, mask)
+    def forward(self, features, mask=None, input_images=None):
+        return self.layers(features, mask, input_images)
 
-    def layers(self, features, mask=None):
-        mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(features)
+    def layers(self, features, mask=None, input_images=None):
+        mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(
+            features, input_images
+        )
         if self.transformer_in_feature == "multi_scale_pixel_decoder":
             predictions = self.predictor(multi_scale_features, mask_features, mask)
         else:
@@ -129,4 +131,10 @@ class MaskFormerHead(nn.Module):
                 predictions = self.predictor(mask_features, mask_features, mask)
             else:
                 predictions = self.predictor(features[self.transformer_in_feature], mask_features, mask)
+
+        # Feed edge supervision tensors to criterion during training only.
+        if self.training:
+            boundary_loss_inputs = self.pixel_decoder.get_boundary_loss_inputs()
+            if boundary_loss_inputs is not None:
+                predictions.update(boundary_loss_inputs)
         return predictions

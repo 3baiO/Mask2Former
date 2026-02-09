@@ -16,6 +16,7 @@ from detectron2.modeling import SEM_SEG_HEADS_REGISTRY
 
 from ..transformer_decoder.position_encoding import PositionEmbeddingSine
 from ..transformer_decoder.transformer import _get_clones, _get_activation_fn
+from .befbm import BoundaryEnhancedFeatureBridgingModule, SobelBoundaryExtractor
 from .ops.modules import MSDeformAttn
 
 
@@ -178,6 +179,9 @@ class MSDeformAttnPixelDecoder(nn.Module):
         # deformable transformer encoder args
         transformer_in_features: List[str],
         common_stride: int,
+        boundary_aware_enabled: bool,
+        befbm_enabled: bool,
+        sobel_eps: float,
     ):
         """
         NOTE: this interface is experimental.
@@ -253,6 +257,19 @@ class MSDeformAttnPixelDecoder(nn.Module):
         
         self.maskformer_num_feature_levels = 3  # always use 3 scales
         self.common_stride = common_stride
+        self.boundary_aware_enabled = boundary_aware_enabled
+        self.befbm_enabled = boundary_aware_enabled and befbm_enabled
+        self._last_boundary_loss_inputs = None
+        if self.befbm_enabled:
+            self.befbm = BoundaryEnhancedFeatureBridgingModule(
+                channels=conv_dim, num_feature_levels=self.transformer_num_feature_levels
+            )
+        else:
+            self.befbm = None
+        if self.boundary_aware_enabled:
+            self.boundary_extractor = SobelBoundaryExtractor(eps=sobel_eps)
+        else:
+            self.boundary_extractor = None
 
         # extra fpn levels
         stride = min(self.transformer_feature_strides)
@@ -309,10 +326,17 @@ class MSDeformAttnPixelDecoder(nn.Module):
         ] = cfg.MODEL.SEM_SEG_HEAD.TRANSFORMER_ENC_LAYERS  # a separate config
         ret["transformer_in_features"] = cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES
         ret["common_stride"] = cfg.MODEL.SEM_SEG_HEAD.COMMON_STRIDE
+        ret["boundary_aware_enabled"] = cfg.MODEL.BOUNDARY_AWARE.ENABLED
+        ret["befbm_enabled"] = cfg.MODEL.BOUNDARY_AWARE.BEFBM_ENABLED
+        ret["sobel_eps"] = cfg.MODEL.BOUNDARY_AWARE.SOBEL_EPS
         return ret
 
+    def get_boundary_loss_inputs(self):
+        return self._last_boundary_loss_inputs
+
     @autocast(enabled=False)
-    def forward_features(self, features):
+    def forward_features(self, features, input_images=None):
+        self._last_boundary_loss_inputs = None
         srcs = []
         pos = []
         # Reverse feature maps into top-down order (from low to high resolution)
@@ -338,6 +362,12 @@ class MSDeformAttnPixelDecoder(nn.Module):
         for i, z in enumerate(y):
             out.append(z.transpose(1, 2).view(bs, -1, spatial_shapes[i][0], spatial_shapes[i][1]))
 
+        # BEFBM insertion point: directly after transformer encoder feature extraction.
+        if self.befbm is not None:
+            out = self.befbm(out)
+
+        encoder_features_for_edge = out[:self.transformer_num_feature_levels]
+
         # append `out` with extra FPN levels
         # Reverse feature maps into top-down order (from low to high resolution)
         for idx, f in enumerate(self.in_features[:self.num_fpn_levels][::-1]):
@@ -354,5 +384,17 @@ class MSDeformAttnPixelDecoder(nn.Module):
             if num_cur_levels < self.maskformer_num_feature_levels:
                 multi_scale_features.append(o)
                 num_cur_levels += 1
+
+        # Boundary targets are only required for training-time edge supervision.
+        if self.training and self.boundary_extractor is not None and input_images is not None:
+            edge_map = self.boundary_extractor(input_images.float())
+            edge_targets = [
+                F.interpolate(edge_map, size=z.shape[-2:], mode="bilinear", align_corners=False).detach()
+                for z in encoder_features_for_edge
+            ]
+            self._last_boundary_loss_inputs = {
+                "edge_encoder_features": encoder_features_for_edge,
+                "edge_targets": edge_targets,
+            }
 
         return self.mask_features(out[-1]), out[0], multi_scale_features

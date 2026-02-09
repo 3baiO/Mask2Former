@@ -189,6 +189,27 @@ class SetCriterion(nn.Module):
         del target_masks
         return losses
 
+    def loss_edge(self, outputs):
+        assert "edge_encoder_features" in outputs and "edge_targets" in outputs
+        edge_features = outputs["edge_encoder_features"]
+        edge_targets = outputs["edge_targets"]
+
+        if len(edge_features) == 0:
+            device = outputs["pred_logits"].device
+            return {"loss_edge": torch.zeros((), device=device)}
+
+        loss_edge = 0.0
+        for z_l, e_l in zip(edge_features, edge_targets):
+            e_l = e_l.to(z_l)
+            if e_l.shape[-2:] != z_l.shape[-2:]:
+                e_l = F.interpolate(e_l, size=z_l.shape[-2:], mode="bilinear", align_corners=False)
+            if e_l.shape[1] == 1 and z_l.shape[1] != 1:
+                e_l = e_l.expand(-1, z_l.shape[1], -1, -1)
+            diff = z_l.float() - e_l.float()
+            loss_edge = loss_edge + torch.norm(diff, p=2) ** 2
+
+        return {"loss_edge": loss_edge}
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -243,6 +264,9 @@ class SetCriterion(nn.Module):
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
                     l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
+
+        if "edge_encoder_features" in outputs and "edge_targets" in outputs:
+            losses.update(self.loss_edge(outputs))
 
         return losses
 
