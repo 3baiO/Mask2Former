@@ -13,14 +13,62 @@ except:
     pass
 
 import copy
+import importlib
 import itertools
 import logging
 import os
+import sys
+import types
 
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
 
 import torch
+
+
+def _alias_legacy_cityscapes_api_namespace():
+    """
+    Detectron2 0.6 imports Cityscapes scripts from a legacy namespace:
+    deeplearning.projects.cityscapesApi.cityscapesscripts.*
+    Modern installations expose cityscapesscripts.* directly.
+    """
+    try:
+        import cityscapesscripts  # noqa: F401
+    except Exception:
+        return
+
+    def _ensure_package(module_name):
+        module = sys.modules.get(module_name)
+        if module is None:
+            module = types.ModuleType(module_name)
+            module.__path__ = []  # mark as package
+            sys.modules[module_name] = module
+        if "." in module_name:
+            parent_name, child_name = module_name.rsplit(".", 1)
+            parent = _ensure_package(parent_name)
+            setattr(parent, child_name, module)
+        return module
+
+    _ensure_package("deeplearning.projects.cityscapesApi")
+
+    aliases = {
+        "deeplearning.projects.cityscapesApi.cityscapesscripts": "cityscapesscripts",
+        "deeplearning.projects.cityscapesApi.cityscapesscripts.helpers": "cityscapesscripts.helpers",
+        "deeplearning.projects.cityscapesApi.cityscapesscripts.helpers.labels": "cityscapesscripts.helpers.labels",
+        "deeplearning.projects.cityscapesApi.cityscapesscripts.evaluation": "cityscapesscripts.evaluation",
+        "deeplearning.projects.cityscapesApi.cityscapesscripts.evaluation.evalPixelLevelSemanticLabeling": "cityscapesscripts.evaluation.evalPixelLevelSemanticLabeling",
+        "deeplearning.projects.cityscapesApi.cityscapesscripts.evaluation.evalInstanceLevelSemanticLabeling": "cityscapesscripts.evaluation.evalInstanceLevelSemanticLabeling",
+    }
+
+    for legacy_name, modern_name in aliases.items():
+        modern_module = importlib.import_module(modern_name)
+        sys.modules[legacy_name] = modern_module
+        parent_name, child_name = legacy_name.rsplit(".", 1)
+        parent = _ensure_package(parent_name)
+        setattr(parent, child_name, modern_module)
+
+
+_alias_legacy_cityscapes_api_namespace()
 
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
@@ -57,6 +105,23 @@ from mask2former import (
     SemanticSegmentorWithTTA,
     add_maskformer2_config,
 )
+
+
+def _log_boundary_aware_config(cfg):
+    logger = logging.getLogger("mask2former")
+    ba = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE
+    logger.info(
+        "Boundary-aware config: enabled=%s, edge_loss_weight=%.4f, to_grayscale=%s, normalize=%s, debug=%s",
+        ba.ENABLED,
+        ba.EDGE_LOSS_WEIGHT,
+        ba.TO_GRAYSCALE,
+        ba.NORMALIZE,
+        ba.DEBUG,
+    )
+    if ba.DEBUG and not ba.ENABLED:
+        logger.warning("Boundary debug is enabled while boundary-aware module is disabled.")
+    if ba.ENABLED and ba.EDGE_LOSS_WEIGHT <= 0.0:
+        logger.warning("Boundary-aware module is enabled but EDGE_LOSS_WEIGHT <= 0.")
 
 
 class Trainer(DefaultTrainer):
@@ -292,6 +357,7 @@ def setup(args):
     default_setup(cfg, args)
     # Setup logger for "mask_former" module
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask2former")
+    _log_boundary_aware_config(cfg)
     return cfg
 
 

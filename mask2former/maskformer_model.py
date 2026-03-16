@@ -1,4 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
+import logging
 from typing import Tuple
 
 import torch
@@ -43,6 +44,7 @@ class MaskFormer(nn.Module):
         panoptic_on: bool,
         instance_on: bool,
         test_topk_per_image: int,
+        boundary_debug: bool = False,
     ):
         """
         Args:
@@ -89,6 +91,8 @@ class MaskFormer(nn.Module):
         self.instance_on = instance_on
         self.panoptic_on = panoptic_on
         self.test_topk_per_image = test_topk_per_image
+        self.boundary_debug = boundary_debug
+        self.logger = logging.getLogger(__name__)
 
         if not self.semantic_on:
             assert self.sem_seg_postprocess_before_inference
@@ -106,6 +110,8 @@ class MaskFormer(nn.Module):
         class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
         dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
         mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
+        edge_weight = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.EDGE_LOSS_WEIGHT
+        boundary_aware_enabled = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.ENABLED
 
         # building criterion
         matcher = HungarianMatcher(
@@ -125,6 +131,9 @@ class MaskFormer(nn.Module):
             weight_dict.update(aux_weight_dict)
 
         losses = ["labels", "masks"]
+        if boundary_aware_enabled:
+            weight_dict["loss_edge"] = edge_weight
+            losses.append("edge")
 
         criterion = SetCriterion(
             sem_seg_head.num_classes,
@@ -158,6 +167,7 @@ class MaskFormer(nn.Module):
             "instance_on": cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON,
             "panoptic_on": cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON,
             "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
+            "boundary_debug": cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.DEBUG,
         }
 
     @property
@@ -195,7 +205,8 @@ class MaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
+        boundary_images = images.tensor * self.pixel_std + self.pixel_mean if self.training else None
+        outputs = self.sem_seg_head(features, images=boundary_images)
 
         if self.training:
             # mask classification target
@@ -214,6 +225,39 @@ class MaskFormer(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
+
+            if self.boundary_debug:
+                if "boundary_z_features" in outputs and "boundary_maps" in outputs:
+                    for level_idx, (z_feat, edge_map) in enumerate(
+                        zip(outputs["boundary_z_features"], outputs["boundary_maps"])
+                    ):
+                        self.logger.info(
+                            "Boundary debug level %d: Z^l shape=%s, E^l shape=%s",
+                            level_idx,
+                            tuple(z_feat.shape),
+                            tuple(edge_map.shape),
+                        )
+                if "boundary_alphas" in outputs:
+                    for level_idx, alpha in enumerate(outputs["boundary_alphas"]):
+                        self.logger.info(
+                            "Boundary debug alpha level %d: min=%.6f max=%.6f mean=%.6f",
+                            level_idx,
+                            float(alpha.min().detach()),
+                            float(alpha.max().detach()),
+                            float(alpha.mean().detach()),
+                        )
+                loss_cls = float(losses["loss_ce"].detach()) if "loss_ce" in losses else 0.0
+                loss_mask = float(losses["loss_mask"].detach()) if "loss_mask" in losses else 0.0
+                loss_dice = float(losses["loss_dice"].detach()) if "loss_dice" in losses else 0.0
+                loss_edge = float(losses["loss_edge"].detach()) if "loss_edge" in losses else 0.0
+                loss_total = float(sum(losses.values()).detach())
+                self.logger.info(
+                    "Boundary debug losses: L_cls=%.6f, L_mask=%.6f, L_edge=%.6f, L_total=%.6f",
+                    loss_cls,
+                    loss_mask + loss_dice,
+                    loss_edge,
+                    loss_total,
+                )
             return losses
         else:
             mask_cls_results = outputs["pred_logits"]

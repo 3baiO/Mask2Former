@@ -189,6 +189,30 @@ class SetCriterion(nn.Module):
         del target_masks
         return losses
 
+    def loss_edge(self, outputs, targets, indices, num_masks):
+        """
+        Boundary supervision loss across all scales:
+            L_edge = sum_l ||Z^l - E^l||_2^2
+        where Z^l is predicted 1-channel boundary map from features.
+        """
+        del targets, indices, num_masks
+        assert "boundary_preds" in outputs and "boundary_maps" in outputs
+
+        boundary_preds = outputs["boundary_preds"]
+        boundary_maps = outputs["boundary_maps"]
+        assert len(boundary_preds) == len(boundary_maps), (
+            f"Scale mismatch for edge loss: {len(boundary_preds)} preds vs {len(boundary_maps)} maps"
+        )
+
+        total_edge_loss = boundary_preds[0].new_tensor(0.0)
+        for pred_edge, target_edge in zip(boundary_preds, boundary_maps):
+            total_edge_loss = total_edge_loss + F.mse_loss(
+                pred_edge.float(),
+                target_edge.float(),
+                reduction="mean",
+            )
+        return {"loss_edge": total_edge_loss}
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -205,6 +229,7 @@ class SetCriterion(nn.Module):
         loss_map = {
             'labels': self.loss_labels,
             'masks': self.loss_masks,
+            'edge': self.loss_edge,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
@@ -240,6 +265,8 @@ class SetCriterion(nn.Module):
             for i, aux_outputs in enumerate(outputs["aux_outputs"]):
                 indices = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
+                    if loss == "edge":
+                        continue
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
                     l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)

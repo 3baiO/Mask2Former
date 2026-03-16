@@ -1,0 +1,9 @@
+_BASE_: maskformer2_R50_bs16_90k.yaml
+MODEL:
+  MASK_FORMER:
+    BOUNDARY_AWARE:
+      ENABLED: True
+      TO_GRAYSCALE: True
+      NORMALIZE: True
+      EDGE_LOSS_WEIGHT: 0.1
+      DEBUG: False

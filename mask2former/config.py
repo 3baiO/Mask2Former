@@ -112,3 +112,11 @@ def add_maskformer2_config(cfg):
     # Importance sampling parameter for PointRend point sampling during training. Parametr `beta` in
     # the original paper.
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
+
+    # boundary-aware configs
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE = CN()
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.ENABLED = False
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.TO_GRAYSCALE = True
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.NORMALIZE = True
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.EDGE_LOSS_WEIGHT = 0.1
+    cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.DEBUG = False

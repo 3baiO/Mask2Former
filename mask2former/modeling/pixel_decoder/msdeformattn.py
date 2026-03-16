@@ -16,6 +16,7 @@ from detectron2.modeling import SEM_SEG_HEADS_REGISTRY
 
 from ..transformer_decoder.position_encoding import PositionEmbeddingSine
 from ..transformer_decoder.transformer import _get_clones, _get_activation_fn
+from .boundary_aware import FeatureBridgingModule, SobelBoundaryExtractor
 from .ops.modules import MSDeformAttn
 
 
@@ -178,6 +179,9 @@ class MSDeformAttnPixelDecoder(nn.Module):
         # deformable transformer encoder args
         transformer_in_features: List[str],
         common_stride: int,
+        boundary_aware_enabled: bool = False,
+        boundary_to_grayscale: bool = True,
+        boundary_normalize: bool = True,
     ):
         """
         NOTE: this interface is experimental.
@@ -291,6 +295,33 @@ class MSDeformAttnPixelDecoder(nn.Module):
         self.lateral_convs = lateral_convs[::-1]
         self.output_convs = output_convs[::-1]
 
+        self.boundary_aware_enabled = boundary_aware_enabled
+        if self.boundary_aware_enabled:
+            self.boundary_extractor = SobelBoundaryExtractor(
+                to_grayscale=boundary_to_grayscale,
+                normalize=boundary_normalize,
+            )
+            self.feature_bridges = nn.ModuleList(
+                [
+                    FeatureBridgingModule(
+                        in_channels_i=conv_dim,
+                        in_channels_j=conv_dim,
+                        out_channels=conv_dim,
+                    )
+                    for _ in range(max(self.transformer_num_feature_levels - 1, 0))
+                ]
+            )
+            self.boundary_predictors = nn.ModuleList(
+                [nn.Conv2d(conv_dim, 1, kernel_size=1) for _ in range(self.maskformer_num_feature_levels)]
+            )
+            for predictor in self.boundary_predictors:
+                nn.init.xavier_uniform_(predictor.weight, gain=1)
+                nn.init.constant_(predictor.bias, 0)
+        else:
+            self.boundary_extractor = None
+            self.feature_bridges = nn.ModuleList()
+            self.boundary_predictors = nn.ModuleList()
+
     @classmethod
     def from_config(cls, cfg, input_shape: Dict[str, ShapeSpec]):
         ret = {}
@@ -309,10 +340,27 @@ class MSDeformAttnPixelDecoder(nn.Module):
         ] = cfg.MODEL.SEM_SEG_HEAD.TRANSFORMER_ENC_LAYERS  # a separate config
         ret["transformer_in_features"] = cfg.MODEL.SEM_SEG_HEAD.DEFORMABLE_TRANSFORMER_ENCODER_IN_FEATURES
         ret["common_stride"] = cfg.MODEL.SEM_SEG_HEAD.COMMON_STRIDE
+        ret["boundary_aware_enabled"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.ENABLED
+        ret["boundary_to_grayscale"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.TO_GRAYSCALE
+        ret["boundary_normalize"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.NORMALIZE
         return ret
 
     @autocast(enabled=False)
-    def forward_features(self, features):
+    def _apply_feature_bridging(self, srcs: List[torch.Tensor]):
+        if not self.boundary_aware_enabled or len(srcs) <= 1:
+            return srcs, None
+
+        bridged_srcs = [srcs[0]]
+        alphas = []
+        for idx in range(1, len(srcs)):
+            # Keep each level output at the current (higher-resolution) scale.
+            fused, alpha = self.feature_bridges[idx - 1](srcs[idx], srcs[idx - 1], return_alpha=True)
+            bridged_srcs.append(fused)
+            alphas.append(alpha)
+        return bridged_srcs, alphas
+
+    @autocast(enabled=False)
+    def forward_features(self, features, images=None):
         srcs = []
         pos = []
         # Reverse feature maps into top-down order (from low to high resolution)
@@ -320,6 +368,8 @@ class MSDeformAttnPixelDecoder(nn.Module):
             x = features[f].float()  # deformable detr does not support half precision
             srcs.append(self.input_proj[idx](x))
             pos.append(self.pe_layer(x))
+
+        srcs, bridge_alphas = self._apply_feature_bridging(srcs)
 
         y, spatial_shapes, level_start_index = self.transformer(srcs, pos)
         bs = y.shape[0]
@@ -355,4 +405,24 @@ class MSDeformAttnPixelDecoder(nn.Module):
                 multi_scale_features.append(o)
                 num_cur_levels += 1
 
-        return self.mask_features(out[-1]), out[0], multi_scale_features
+        mask_features = self.mask_features(out[-1])
+
+        if self.boundary_aware_enabled and self.training and images is not None:
+            boundary_z_features = multi_scale_features
+            target_sizes = [tuple(z.shape[-2:]) for z in boundary_z_features]
+            edge_features = self.boundary_extractor(images.float(), target_sizes=target_sizes)
+            boundary_preds = [
+                predictor(z_feature)
+                for predictor, z_feature in zip(self.boundary_predictors, boundary_z_features)
+            ]
+            return (
+                mask_features,
+                out[0],
+                multi_scale_features,
+                boundary_z_features,
+                edge_features,
+                boundary_preds,
+                bridge_alphas,
+            )
+
+        return mask_features, out[0], multi_scale_features

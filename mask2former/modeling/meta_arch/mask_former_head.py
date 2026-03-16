@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import logging
+import inspect
 from copy import deepcopy
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -81,6 +82,12 @@ class MaskFormerHead(nn.Module):
         self.pixel_decoder = pixel_decoder
         self.predictor = transformer_predictor
         self.transformer_in_feature = transformer_in_feature
+        try:
+            self._pixel_decoder_supports_images = (
+                "images" in inspect.signature(self.pixel_decoder.forward_features).parameters
+            )
+        except (TypeError, ValueError):
+            self._pixel_decoder_supports_images = False
 
         self.num_classes = num_classes
 
@@ -112,11 +119,16 @@ class MaskFormerHead(nn.Module):
             ),
         }
 
-    def forward(self, features, mask=None):
-        return self.layers(features, mask)
+    def forward(self, features, mask=None, images=None):
+        return self.layers(features, mask, images)
 
-    def layers(self, features, mask=None):
-        mask_features, transformer_encoder_features, multi_scale_features = self.pixel_decoder.forward_features(features)
+    def layers(self, features, mask=None, images=None):
+        if images is not None and self._pixel_decoder_supports_images:
+            pixel_decoder_outputs = self.pixel_decoder.forward_features(features, images=images)
+        else:
+            pixel_decoder_outputs = self.pixel_decoder.forward_features(features)
+
+        mask_features, transformer_encoder_features, multi_scale_features = pixel_decoder_outputs[:3]
         if self.transformer_in_feature == "multi_scale_pixel_decoder":
             predictions = self.predictor(multi_scale_features, mask_features, mask)
         else:
@@ -129,4 +141,13 @@ class MaskFormerHead(nn.Module):
                 predictions = self.predictor(mask_features, mask_features, mask)
             else:
                 predictions = self.predictor(features[self.transformer_in_feature], mask_features, mask)
+
+        if len(pixel_decoder_outputs) >= 5:
+            predictions["boundary_features"] = pixel_decoder_outputs[3]
+            predictions["boundary_z_features"] = pixel_decoder_outputs[3]
+            predictions["boundary_maps"] = pixel_decoder_outputs[4]
+        if len(pixel_decoder_outputs) >= 6:
+            predictions["boundary_preds"] = pixel_decoder_outputs[5]
+        if len(pixel_decoder_outputs) >= 7:
+            predictions["boundary_alphas"] = pixel_decoder_outputs[6]
         return predictions
