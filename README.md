@@ -1,4 +1,4 @@
-# Mask2Former: Masked-attention Mask Transformer for Universal Image Segmentation (CVPR 2022)
+d# Mask2Former: Masked-attention Mask Transformer for Universal Image Segmentation (CVPR 2022)
 
 [Bowen Cheng](https://bowenc0221.github.io/), [Ishan Misra](https://imisra.github.io/), [Alexander G. Schwing](https://alexander-schwing.de/), [Alexander Kirillov](https://alexander-kirillov.github.io/), [Rohit Girdhar](https://rohitgirdhar.github.io/)
 
@@ -10,21 +10,13 @@
 
 ### Features
 * A single architecture for panoptic, instance and semantic segmentation.
-* Support major segmentation datasets: ADE20K, Cityscapes, COCO, Mapillary Vistas.
+* Support major segmentation datasets: ADE20K, Cityscapes, COCO, Mapillary Vistas.d
+## Project Extensions
 
-## Updates
-* Add Google Colab demo.
-* Video instance segmentation is now supported! Please check our [tech report](https://arxiv.org/abs/2112.10764) for more details.
+This workspace also contains a boundary-aware semantic segmentation extension built on top of Mask2Former.
 
-## Installation
-
-See [installation instructions](INSTALL.md).
-
-## Getting Started
-
-See [Preparing Datasets for Mask2Former](datasets/README.md).
-
-See [Getting Started with Mask2Former](GETTING_STARTED.md).
+- Reproduction and experiment guide: [BOUNDARY_AWARE_REPRO.md](BOUNDARY_AWARE_REPRO.md)
+- Unified training and evaluation script: `scripts/train_boundary.sh`
 
 Run our demo using Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1uIWE5KbGFSjrxey2aRd5pWkKNY1_SaNq)
 

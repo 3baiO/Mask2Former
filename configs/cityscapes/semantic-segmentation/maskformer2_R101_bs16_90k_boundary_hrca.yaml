@@ -1,0 +1,8 @@
+_BASE_: maskformer2_R101_bs16_90k_boundary.yaml
+MODEL:
+  MASK_FORMER:
+    BOUNDARY_DECODER:
+      ENABLED: True
+      QUERY_REFINEMENT: True
+      HIGH_RES_ONLY: True
+      TOPK_RATIO: 128

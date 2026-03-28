@@ -135,6 +135,67 @@ class CrossAttentionLayer(nn.Module):
                                  memory_key_padding_mask, pos, query_pos)
 
 
+class BoundaryGuidedQueryRefiner(nn.Module):
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.refine = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, query_embed, mask_logits, boundary_logits, boundary_pos):
+        query_embed_bqc = query_embed.transpose(0, 1)
+        boundary_weights = F.interpolate(
+            boundary_logits,
+            size=boundary_pos.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).sigmoid()
+        mask_weights = F.interpolate(
+            mask_logits,
+            size=boundary_pos.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).sigmoid()
+        focus_weights = (mask_weights * boundary_weights).flatten(2)
+        focus_weights = focus_weights / (focus_weights.sum(-1, keepdim=True) + 1e-6)
+        boundary_pos_flat = boundary_pos.flatten(2).transpose(1, 2)
+        query_pos = torch.bmm(focus_weights, boundary_pos_flat)
+        query_pos = self.refine(query_pos + query_embed_bqc)
+        return query_pos.transpose(0, 1)
+
+
+class BoundaryGuidedHRCA(nn.Module):
+    def __init__(self, d_model: int, nhead: int, topk_ratio: int):
+        super().__init__()
+        self.cross_attn = CrossAttentionLayer(d_model=d_model, nhead=nhead, dropout=0.0)
+        self.topk_ratio = max(1, topk_ratio)
+
+    def forward(self, tgt, boundary_feature, boundary_logits, boundary_pos, query_pos):
+        batch_size, channels, _, _ = boundary_feature.shape
+        boundary_tokens = boundary_feature.flatten(2).transpose(1, 2)
+        boundary_pos_tokens = boundary_pos.flatten(2).transpose(1, 2)
+        boundary_scores = boundary_logits.sigmoid().flatten(2).squeeze(1)
+
+        num_tokens = boundary_scores.shape[1]
+        topk = max(1, num_tokens // self.topk_ratio)
+        topk_indices = boundary_scores.topk(topk, dim=1).indices
+
+        gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, channels)
+        sparse_tokens = torch.gather(boundary_tokens, 1, gather_index).permute(1, 0, 2)
+        sparse_pos = torch.gather(boundary_pos_tokens, 1, gather_index).permute(1, 0, 2)
+
+        return self.cross_attn(
+            tgt,
+            sparse_tokens,
+            memory_mask=None,
+            memory_key_padding_mask=None,
+            pos=sparse_pos,
+            query_pos=query_pos,
+        )
+
+
 class FFNLayer(nn.Module):
 
     def __init__(self, d_model, dim_feedforward=2048, dropout=0.0,
@@ -247,6 +308,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         pre_norm: bool,
         mask_dim: int,
         enforce_input_project: bool,
+        boundary_decoder_enabled: bool,
+        boundary_query_refinement: bool,
+        boundary_high_res_only: bool,
+        boundary_topk_ratio: int,
     ):
         """
         NOTE: this interface is experimental.
@@ -277,6 +342,9 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         # define Transformer decoder here
         self.num_heads = nheads
         self.num_layers = dec_layers
+        self.boundary_decoder_enabled = boundary_decoder_enabled
+        self.boundary_query_refinement = boundary_query_refinement
+        self.boundary_high_res_only = boundary_high_res_only
         self.transformer_self_attention_layers = nn.ModuleList()
         self.transformer_cross_attention_layers = nn.ModuleList()
         self.transformer_ffn_layers = nn.ModuleList()
@@ -332,6 +400,12 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         if self.mask_classification:
             self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        if self.boundary_decoder_enabled:
+            self.boundary_query_refiner = BoundaryGuidedQueryRefiner(hidden_dim)
+            self.boundary_guided_hrca = BoundaryGuidedHRCA(hidden_dim, nheads, boundary_topk_ratio)
+        else:
+            self.boundary_query_refiner = None
+            self.boundary_guided_hrca = None
 
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
@@ -355,12 +429,15 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret["dec_layers"] = cfg.MODEL.MASK_FORMER.DEC_LAYERS - 1
         ret["pre_norm"] = cfg.MODEL.MASK_FORMER.PRE_NORM
         ret["enforce_input_project"] = cfg.MODEL.MASK_FORMER.ENFORCE_INPUT_PROJ
-
         ret["mask_dim"] = cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
+        ret["boundary_decoder_enabled"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.ENABLED
+        ret["boundary_query_refinement"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.QUERY_REFINEMENT
+        ret["boundary_high_res_only"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.HIGH_RES_ONLY
+        ret["boundary_topk_ratio"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.TOPK_RATIO
 
         return ret
 
-    def forward(self, x, mask_features, mask = None):
+    def forward(self, x, mask_features, mask=None, boundary_guidance=None):
         # x is a list of multi-scale feature
         assert len(x) == self.num_feature_levels
         src = []
@@ -388,10 +465,25 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         predictions_class = []
         predictions_mask = []
 
+        boundary_feature = None
+        boundary_pred = None
+        boundary_pos = None
+        if self.boundary_decoder_enabled and boundary_guidance is not None:
+            boundary_feature = boundary_guidance["boundary_z_features"][-1]
+            boundary_pred = boundary_guidance["boundary_preds"][-1]
+            boundary_pos = self.pe_layer(boundary_feature, None)
+
         # prediction heads on learnable query features
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
+        if (
+            self.boundary_decoder_enabled
+            and self.boundary_query_refinement
+            and boundary_feature is not None
+            and boundary_pred is not None
+        ):
+            query_embed = self.boundary_query_refiner(query_embed, outputs_mask, boundary_pred, boundary_pos)
 
         for i in range(self.num_layers):
             level_index = i % self.num_feature_levels
@@ -403,6 +495,19 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
                 memory_key_padding_mask=None,  # here we do not apply masking on padded region
                 pos=pos[level_index], query_pos=query_embed
             )
+            if (
+                self.boundary_decoder_enabled
+                and boundary_feature is not None
+                and boundary_pred is not None
+                and (not self.boundary_high_res_only or level_index == self.num_feature_levels - 1)
+            ):
+                output = self.boundary_guided_hrca(
+                    output,
+                    boundary_feature,
+                    boundary_pred,
+                    boundary_pos,
+                    query_embed,
+                )
 
             output = self.transformer_self_attention_layers[i](
                 output, tgt_mask=None,
@@ -418,6 +523,13 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
+            if (
+                self.boundary_decoder_enabled
+                and self.boundary_query_refinement
+                and boundary_feature is not None
+                and boundary_pred is not None
+            ):
+                query_embed = self.boundary_query_refiner(query_embed, outputs_mask, boundary_pred, boundary_pos)
 
         assert len(predictions_class) == self.num_layers + 1
 

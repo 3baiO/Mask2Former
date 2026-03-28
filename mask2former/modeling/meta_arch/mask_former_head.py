@@ -129,8 +129,21 @@ class MaskFormerHead(nn.Module):
             pixel_decoder_outputs = self.pixel_decoder.forward_features(features)
 
         mask_features, transformer_encoder_features, multi_scale_features = pixel_decoder_outputs[:3]
+        boundary_info = pixel_decoder_outputs[3] if len(pixel_decoder_outputs) > 3 else None
+        boundary_guidance = None
+        if boundary_info is not None:
+            boundary_guidance = {
+                "boundary_z_features": boundary_info["boundary_z_features"],
+                "boundary_preds": boundary_info["boundary_preds"],
+            }
+
         if self.transformer_in_feature == "multi_scale_pixel_decoder":
-            predictions = self.predictor(multi_scale_features, mask_features, mask)
+            predictions = self.predictor(
+                multi_scale_features,
+                mask_features,
+                mask,
+                boundary_guidance=boundary_guidance,
+            )
         else:
             if self.transformer_in_feature == "transformer_encoder":
                 assert (
@@ -142,12 +155,12 @@ class MaskFormerHead(nn.Module):
             else:
                 predictions = self.predictor(features[self.transformer_in_feature], mask_features, mask)
 
-        if len(pixel_decoder_outputs) >= 5:
-            predictions["boundary_features"] = pixel_decoder_outputs[3]
-            predictions["boundary_z_features"] = pixel_decoder_outputs[3]
-            predictions["boundary_maps"] = pixel_decoder_outputs[4]
-        if len(pixel_decoder_outputs) >= 6:
-            predictions["boundary_preds"] = pixel_decoder_outputs[5]
-        if len(pixel_decoder_outputs) >= 7:
-            predictions["boundary_alphas"] = pixel_decoder_outputs[6]
+        if boundary_info is not None:
+            predictions["boundary_features"] = boundary_info["boundary_z_features"]
+            predictions["boundary_z_features"] = boundary_info["boundary_z_features"]
+            predictions["boundary_preds"] = boundary_info["boundary_preds"]
+            if boundary_info["boundary_maps"] is not None:
+                predictions["boundary_maps"] = boundary_info["boundary_maps"]
+            if boundary_info["boundary_alphas"] is not None:
+                predictions["boundary_alphas"] = boundary_info["boundary_alphas"]
         return predictions

@@ -407,22 +407,23 @@ class MSDeformAttnPixelDecoder(nn.Module):
 
         mask_features = self.mask_features(out[-1])
 
-        if self.boundary_aware_enabled and self.training and images is not None:
+        if self.boundary_aware_enabled:
             boundary_z_features = multi_scale_features
-            target_sizes = [tuple(z.shape[-2:]) for z in boundary_z_features]
-            edge_features = self.boundary_extractor(images.float(), target_sizes=target_sizes)
             boundary_preds = [
                 predictor(z_feature)
                 for predictor, z_feature in zip(self.boundary_predictors, boundary_z_features)
             ]
-            return (
-                mask_features,
-                out[0],
-                multi_scale_features,
-                boundary_z_features,
-                edge_features,
-                boundary_preds,
-                bridge_alphas,
-            )
+            boundary_maps = None
+            if self.training and images is not None:
+                target_sizes = [tuple(z.shape[-2:]) for z in boundary_z_features]
+                boundary_maps = self.boundary_extractor(images.float(), target_sizes=target_sizes)
+
+            boundary_info = {
+                "boundary_z_features": boundary_z_features,
+                "boundary_preds": boundary_preds,
+                "boundary_maps": boundary_maps,
+                "boundary_alphas": bridge_alphas,
+            }
+            return mask_features, out[0], multi_scale_features, boundary_info
 
         return mask_features, out[0], multi_scale_features
