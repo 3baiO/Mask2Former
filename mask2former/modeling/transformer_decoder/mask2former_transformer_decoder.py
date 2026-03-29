@@ -9,6 +9,7 @@ from torch.nn import functional as F
 
 from detectron2.config import configurable
 from detectron2.layers import Conv2d
+from detectron2.utils.events import get_event_storage
 
 from .position_encoding import PositionEmbeddingSine
 from .maskformer_transformer_decoder import TRANSFORMER_DECODER_REGISTRY
@@ -136,13 +137,26 @@ class CrossAttentionLayer(nn.Module):
 
 
 class BoundaryGuidedQueryRefiner(nn.Module):
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, warmup_iters: int, init_gate_bias: float):
         super().__init__()
         self.refine = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        self.warmup_iters = max(0, warmup_iters)
+        self.gate_bias = nn.Parameter(torch.tensor(float(init_gate_bias)))
+
+    def _warmup_scale(self):
+        if not self.training or self.warmup_iters <= 0:
+            return 1.0
+
+        try:
+            storage = get_event_storage()
+        except AssertionError:
+            return 1.0
+
+        return min(1.0, float(storage.iter + 1) / float(self.warmup_iters))
 
     def forward(self, query_embed, mask_logits, boundary_logits, boundary_pos):
         query_embed_bqc = query_embed.transpose(0, 1)
@@ -162,38 +176,93 @@ class BoundaryGuidedQueryRefiner(nn.Module):
         focus_weights = focus_weights / (focus_weights.sum(-1, keepdim=True) + 1e-6)
         boundary_pos_flat = boundary_pos.flatten(2).transpose(1, 2)
         query_pos = torch.bmm(focus_weights, boundary_pos_flat)
-        query_pos = self.refine(query_pos + query_embed_bqc)
-        return query_pos.transpose(0, 1)
+        refined_query = self.refine(query_pos + query_embed_bqc)
+
+        gate = torch.sigmoid(self.gate_bias) * self._warmup_scale()
+        refined_query = query_embed_bqc + (refined_query - query_embed_bqc) * gate
+        return refined_query.transpose(0, 1)
 
 
 class BoundaryGuidedHRCA(nn.Module):
-    def __init__(self, d_model: int, nhead: int, topk_ratio: int):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        topk_ratio: int,
+        min_topk_tokens: int,
+        score_smooth_kernel: int,
+        warmup_iters: int,
+        init_gate_bias: float,
+    ):
         super().__init__()
-        self.cross_attn = CrossAttentionLayer(d_model=d_model, nhead=nhead, dropout=0.0)
+        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=0.0)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(0.0)
         self.topk_ratio = max(1, topk_ratio)
+        self.min_topk_tokens = max(1, min_topk_tokens)
+        self.score_smooth_kernel = max(1, int(score_smooth_kernel))
+        if self.score_smooth_kernel % 2 == 0:
+            self.score_smooth_kernel += 1
+        self.warmup_iters = max(0, warmup_iters)
+        self.gate_bias = nn.Parameter(torch.tensor(float(init_gate_bias)))
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.multihead_attn.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def with_pos_embed(self, tensor, pos: Optional[Tensor]):
+        return tensor if pos is None else tensor + pos
+
+    def _warmup_scale(self):
+        if not self.training or self.warmup_iters <= 0:
+            return 1.0
+
+        try:
+            storage = get_event_storage()
+        except AssertionError:
+            return 1.0
+
+        return min(1.0, float(storage.iter + 1) / float(self.warmup_iters))
 
     def forward(self, tgt, boundary_feature, boundary_logits, boundary_pos, query_pos):
         batch_size, channels, _, _ = boundary_feature.shape
         boundary_tokens = boundary_feature.flatten(2).transpose(1, 2)
         boundary_pos_tokens = boundary_pos.flatten(2).transpose(1, 2)
-        boundary_scores = boundary_logits.sigmoid().flatten(2).squeeze(1)
+        boundary_scores = boundary_logits.sigmoid()
+        if self.score_smooth_kernel > 1:
+            boundary_scores = F.avg_pool2d(
+                boundary_scores,
+                kernel_size=self.score_smooth_kernel,
+                stride=1,
+                padding=self.score_smooth_kernel // 2,
+            )
+        boundary_scores = boundary_scores.flatten(2).squeeze(1)
 
         num_tokens = boundary_scores.shape[1]
-        topk = max(1, num_tokens // self.topk_ratio)
+        topk = min(num_tokens, max(self.min_topk_tokens, num_tokens // self.topk_ratio))
         topk_indices = boundary_scores.topk(topk, dim=1).indices
 
         gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, channels)
         sparse_tokens = torch.gather(boundary_tokens, 1, gather_index).permute(1, 0, 2)
         sparse_pos = torch.gather(boundary_pos_tokens, 1, gather_index).permute(1, 0, 2)
+        sparse_scores = torch.gather(boundary_scores, 1, topk_indices)
 
-        return self.cross_attn(
-            tgt,
-            sparse_tokens,
-            memory_mask=None,
-            memory_key_padding_mask=None,
-            pos=sparse_pos,
-            query_pos=query_pos,
-        )
+        attn_out = self.multihead_attn(
+            query=self.with_pos_embed(tgt, query_pos),
+            key=self.with_pos_embed(sparse_tokens, sparse_pos),
+            value=sparse_tokens,
+            attn_mask=None,
+            key_padding_mask=None,
+        )[0]
+
+        confidence = sparse_scores.mean(dim=1, keepdim=True).clamp(0.0, 1.0)
+        gate = torch.sigmoid(self.gate_bias) * self._warmup_scale()
+        gate = gate * confidence
+        tgt = tgt + self.dropout(attn_out) * gate.view(1, batch_size, 1)
+        tgt = self.norm(tgt)
+        return tgt
 
 
 class FFNLayer(nn.Module):
@@ -312,6 +381,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         boundary_query_refinement: bool,
         boundary_high_res_only: bool,
         boundary_topk_ratio: int,
+        boundary_min_topk_tokens: int,
+        boundary_score_smooth_kernel: int,
+        boundary_warmup_iters: int,
+        boundary_init_gate_bias: float,
     ):
         """
         NOTE: this interface is experimental.
@@ -401,8 +474,20 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
         if self.boundary_decoder_enabled:
-            self.boundary_query_refiner = BoundaryGuidedQueryRefiner(hidden_dim)
-            self.boundary_guided_hrca = BoundaryGuidedHRCA(hidden_dim, nheads, boundary_topk_ratio)
+            self.boundary_query_refiner = BoundaryGuidedQueryRefiner(
+                hidden_dim,
+                boundary_warmup_iters,
+                boundary_init_gate_bias,
+            )
+            self.boundary_guided_hrca = BoundaryGuidedHRCA(
+                hidden_dim,
+                nheads,
+                boundary_topk_ratio,
+                boundary_min_topk_tokens,
+                boundary_score_smooth_kernel,
+                boundary_warmup_iters,
+                boundary_init_gate_bias,
+            )
         else:
             self.boundary_query_refiner = None
             self.boundary_guided_hrca = None
@@ -434,6 +519,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret["boundary_query_refinement"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.QUERY_REFINEMENT
         ret["boundary_high_res_only"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.HIGH_RES_ONLY
         ret["boundary_topk_ratio"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.TOPK_RATIO
+        ret["boundary_min_topk_tokens"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.MIN_TOPK_TOKENS
+        ret["boundary_score_smooth_kernel"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.SCORE_SMOOTH_KERNEL
+        ret["boundary_warmup_iters"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.WARMUP_ITERS
+        ret["boundary_init_gate_bias"] = cfg.MODEL.MASK_FORMER.BOUNDARY_DECODER.INIT_GATE_BIAS
 
         return ret
 

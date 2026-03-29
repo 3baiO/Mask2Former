@@ -163,4 +163,8 @@ class MaskFormerHead(nn.Module):
                 predictions["boundary_maps"] = boundary_info["boundary_maps"]
             if boundary_info["boundary_alphas"] is not None:
                 predictions["boundary_alphas"] = boundary_info["boundary_alphas"]
+            if boundary_info.get("boundary_prop_features") is not None:
+                predictions["boundary_prop_features"] = boundary_info["boundary_prop_features"]
+            if boundary_info.get("boundary_prop_confidences") is not None:
+                predictions["boundary_prop_confidences"] = boundary_info["boundary_prop_confidences"]
         return predictions

@@ -1,70 +1,171 @@
-d# Mask2Former: Masked-attention Mask Transformer for Universal Image Segmentation (CVPR 2022)
+# Boundary-Aware Mask2Former
 
-[Bowen Cheng](https://bowenc0221.github.io/), [Ishan Misra](https://imisra.github.io/), [Alexander G. Schwing](https://alexander-schwing.de/), [Alexander Kirillov](https://alexander-kirillov.github.io/), [Rohit Girdhar](https://rohitgirdhar.github.io/)
+This repository is a research-oriented Mask2Former extension for Cityscapes semantic segmentation. It keeps the original Mask2Former training pipeline, and adds several boundary-enhancement paths around the pixel decoder and transformer decoder so we can compare boundary-guided variants under a unified codebase.
 
-[[`arXiv`](https://arxiv.org/abs/2112.01527)] [[`Project`](https://bowenc0221.github.io/mask2former)] [[`BibTeX`](#CitingMask2Former)]
+## What is in this repo
 
-<div align="center">
-  <img src="https://bowenc0221.github.io/images/maskformerv2_teaser.png" width="100%" height="100%"/>
-</div><br/>
+The current project contains three experiment lines:
 
-### Features
-* A single architecture for panoptic, instance and semantic segmentation.
-* Support major segmentation datasets: ADE20K, Cityscapes, COCO, Mapillary Vistas.d
-## Project Extensions
+- `BEFBM`: boundary-enhanced feature bridging with edge supervision
+- `BEFBM + BFP`: boundary-aware feature propagation on multi-scale pixel-decoder features
+- `BEFBM + HRCA`: boundary-guided decoder refinement with high-resolution cross-attention
 
-This workspace also contains a boundary-aware semantic segmentation extension built on top of Mask2Former.
+The main experiment notes and reproduction details are documented in [BOUNDARY_AWARE_REPRO.md](BOUNDARY_AWARE_REPRO.md).
 
-- Reproduction and experiment guide: [BOUNDARY_AWARE_REPRO.md](BOUNDARY_AWARE_REPRO.md)
-- Unified training and evaluation script: `scripts/train_boundary.sh`
+## Project highlights
 
-Run our demo using Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1uIWE5KbGFSjrxey2aRd5pWkKNY1_SaNq)
+- Built on top of Mask2Former for semantic segmentation
+- Focused on Cityscapes reproduction and controlled ablation
+- Unified launcher for train, resume, background run, and evaluation
+- Supports `R50` and `R101` backbones with matched config presets
+- Keeps the baseline Mask2Former data flow as intact as possible
 
-Integrated into [Huggingface Spaces 🤗](https://huggingface.co/spaces) using [Gradio](https://github.com/gradio-app/gradio). Try out the Web Demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/Mask2Former)
+## Repository layout
 
-Replicate web demo and docker image is available here: [![Replicate](https://replicate.com/facebookresearch/mask2former/badge)](https://replicate.com/facebookresearch/mask2former)
+Key files for this project:
 
-## Advanced usage
+- `README.md`: project overview
+- `BOUNDARY_AWARE_REPRO.md`: detailed experiment and reproduction guide
+- `scripts/train_boundary.sh`: unified launcher for all current variants
+- `mask2former/modeling/pixel_decoder/boundary_aware.py`: BEFBM and BFP related modules
+- `mask2former/modeling/pixel_decoder/msdeformattn.py`: boundary-aware pixel decoder integration
+- `mask2former/modeling/transformer_decoder/mask2former_transformer_decoder.py`: decoder-side HRCA modules
+- `configs/cityscapes/semantic-segmentation/`: experiment configs for baseline, BFP, and HRCA
 
-See [Advanced Usage of Mask2Former](ADVANCED_USAGE.md).
+## Available experiment presets
 
-## Model Zoo and Baselines
+### 1. BEFBM baseline
 
-We provide a large set of baseline results and trained models available for download in the [Mask2Former Model Zoo](MODEL_ZOO.md).
+- `configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary.yaml`
+- `configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary.yaml`
 
-## License
+### 2. BEFBM + BFP
 
-Shield: [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+- `configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary_bfp.yaml`
+- `configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary_bfp.yaml`
 
-The majority of Mask2Former is licensed under a [MIT License](LICENSE).
+### 3. BEFBM + HRCA
 
+- `configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary_hrca.yaml`
+- `configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary_hrca.yaml`
 
-However portions of the project are available under separate license terms: Swin-Transformer-Semantic-Segmentation is licensed under the [MIT license](https://github.com/SwinTransformer/Swin-Transformer-Semantic-Segmentation/blob/main/LICENSE), Deformable-DETR is licensed under the [Apache-2.0 License](https://github.com/fundamentalvision/Deformable-DETR/blob/main/LICENSE).
+## Environment
 
-## <a name="CitingMask2Former"></a>Citing Mask2Former
+The project is expected to run in the existing `mask2former` conda environment:
 
-If you use Mask2Former in your research or wish to refer to the baseline results published in the [Model Zoo](MODEL_ZOO.md), please use the following BibTeX entry.
-
-```BibTeX
-@inproceedings{cheng2021mask2former,
-  title={Masked-attention Mask Transformer for Universal Image Segmentation},
-  author={Bowen Cheng and Ishan Misra and Alexander G. Schwing and Alexander Kirillov and Rohit Girdhar},
-  journal={CVPR},
-  year={2022}
-}
+```bash
+conda activate mask2former
+python -c "import torch; print(torch.__version__)"
 ```
 
-If you find the code useful, please also consider the following BibTeX entry.
+This repository follows the original Mask2Former dependency layout. If you are setting up from scratch, install the base Mask2Former / Detectron2 dependencies first, then run the project-specific experiments from this repo.
 
-```BibTeX
-@inproceedings{cheng2021maskformer,
-  title={Per-Pixel Classification is Not All You Need for Semantic Segmentation},
-  author={Bowen Cheng and Alexander G. Schwing and Alexander Kirillov},
-  journal={NeurIPS},
-  year={2021}
-}
+## Quick start
+
+### Show launcher help
+
+```bash
+scripts/train_boundary.sh --help
 ```
+
+### Train BEFBM
+
+```bash
+scripts/train_boundary.sh --model r50 --variant befbm
+```
+
+### Train BFP
+
+```bash
+scripts/train_boundary.sh --model r50 --variant bfp
+```
+
+### Train HRCA
+
+```bash
+scripts/train_boundary.sh --model r50 --variant hrca
+```
+
+### Resume training
+
+```bash
+scripts/train_boundary.sh --model r50 --variant bfp --resume
+```
+
+### Background run
+
+```bash
+scripts/train_boundary.sh --model r50 --variant bfp --background
+```
+
+### Evaluate a trained model
+
+```bash
+scripts/train_boundary.sh \
+  --model r50 \
+  --variant bfp \
+  --mode eval \
+  --weights output/model_final.pth
+```
+
+## Launcher behavior
+
+The `scripts/train_boundary.sh` helper currently provides:
+
+- `--model <r50|r101>`
+- `--variant <befbm|bfp|hrca>`
+- `--mode <train|eval>`
+- automatic `CUDA_VISIBLE_DEVICES` parsing and `--num-gpus` derivation
+- automatic timestamped log creation under `logs/`
+- automatic output directory creation under `output/`
+- support for resume and background execution
+
+Default preset:
+
+```text
+model=r50
+variant=bfp
+mode=train
+gpus=2,3
+```
+
+## Main code changes
+
+### Boundary-aware pixel decoder
+
+- boundary extraction and feature bridging are implemented in `mask2former/modeling/pixel_decoder/boundary_aware.py`
+- multi-scale boundary outputs are integrated in `mask2former/modeling/pixel_decoder/msdeformattn.py`
+
+### Boundary-guided decoder refinement
+
+- HRCA-related query refinement lives in `mask2former/modeling/transformer_decoder/mask2former_transformer_decoder.py`
+
+### Config extensions
+
+The project adds several config groups in `mask2former/config.py`:
+
+- `MODEL.MASK_FORMER.BOUNDARY_AWARE`
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION`
+- `MODEL.MASK_FORMER.BOUNDARY_DECODER`
+
+## Recommended reading order
+
+If you are new to this repository, read in this order:
+
+1. `README.md`
+2. `BOUNDARY_AWARE_REPRO.md`
+3. `scripts/train_boundary.sh --help`
+4. The matching config file under `configs/cityscapes/semantic-segmentation/`
+
+## Notes
+
+- `output/` and `logs/` are local runtime artifacts and are not meant to be committed
+- `FASeg/` is kept outside the main tracked project workflow unless explicitly needed
+- the current repository is optimized for experimentation and reproduction rather than packaging
 
 ## Acknowledgement
 
-Code is largely based on MaskFormer (https://github.com/facebookresearch/MaskFormer).
+This work is based on the original Mask2Former project:
+
+- Paper: https://arxiv.org/abs/2112.01527
+- Original project: https://github.com/facebookresearch/Mask2Former

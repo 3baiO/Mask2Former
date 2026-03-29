@@ -1,9 +1,12 @@
 # Boundary-Aware Reproduction Guide
 
-本文档面向当前主仓库，也就是已经复现成功的 `BEFBM + Mask2Former` 版本。现在仓库中包含两条可对比的增强路径：
+本文档面向当前主仓库，也就是已经复现成功的 `BEFBM + Mask2Former` 版本。现在仓库中包含三条可对比的增强路径：
 
 - `BEFBM`：边界增强特征桥接 + 边界监督
+- `Boundary-Aware Feature Propagation (BFP)`：在 `BEFBM` 基础上，把 ICCV 2019 的边界控制传播思想接到 pixel decoder 的多尺度特征上
 - `Boundary Decoder HRCA`：在 `BEFBM` 基础上，进一步让边界信息参与 decoder 的 query refinement 和高分辨率 cross-attention
+
+本轮主推路线是 `BEFBM` 和 `BEFBM + BFP`。`HRCA` 代码与脚本入口仍然保留，但只作为历史参考路线。
 
 ## 1. 环境约定
 
@@ -41,6 +44,19 @@ python -c "import torch; print(torch.__version__)"
 - `MODEL.MASK_FORMER.BOUNDARY_DECODER.HIGH_RES_ONLY`
 - `MODEL.MASK_FORMER.BOUNDARY_DECODER.TOPK_RATIO`
 
+### 2.3 BEFBM + Boundary Feature Propagation 配置
+
+- `configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary_bfp.yaml`
+- `configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary_bfp.yaml`
+
+这两份配置在 `BEFBM` 基础上额外打开：
+
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.ENABLED`
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.LEVELS`
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.DIRECTIONS`
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.ALPHA`
+- `MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.GAMMA`
+
 ## 3. 新增模块说明
 
 ### 3.1 BEFBM 部分
@@ -67,7 +83,22 @@ python -c "import torch; print(torch.__version__)"
 - 不替换数据流和训练流程
 - 只让边界信息在 decoder 近端参与 query 决策
 
-### 3.3 Head 透传
+### 3.3 BFP 部分
+
+- 论文：`Boundary-Aware Feature Propagation for Scene Segmentation` (ICCV 2019)
+- `mask2former/modeling/pixel_decoder/boundary_aware.py`
+  - `BoundaryPropagationGate`
+  - `DirectionalPropagation1D`
+  - `BoundaryFeaturePropagation`
+
+当前仓库采用的是工程平滑版 BFP：
+
+- 不引入“边界作为额外语义类”的新监督
+- 直接复用 `BEFBM` 已有的 `boundary_preds`
+- 只在 pixel decoder 的 `multi_scale_features` 上做边界控制传播
+- 不与 HRCA 共享逻辑，也不进入 transformer decoder
+
+### 3.4 Head 透传
 
 - `mask2former/modeling/meta_arch/mask_former_head.py`
   - 将 `boundary_z_features` 和 `boundary_preds` 作为 `boundary_guidance` 传入 decoder
@@ -129,18 +160,32 @@ R101:
 scripts/train_boundary.sh --model r101 --variant hrca
 ```
 
-### 5.3 单卡训练
+### 5.3 训练 BEFBM + BFP
+
+R50:
+
+```bash
+scripts/train_boundary.sh --model r50 --variant bfp
+```
+
+R101:
+
+```bash
+scripts/train_boundary.sh --model r101 --variant bfp
+```
+
+### 5.4 单卡训练
 
 如果要更稳妥地控制显存：
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca --gpus 2 --ims-per-batch 2 --base-lr 0.000025
+scripts/train_boundary.sh --model r50 --variant bfp --gpus 2 --ims-per-batch 2 --base-lr 0.000025
 ```
 
-### 5.4 双卡训练
+### 5.5 双卡训练
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca --gpus 2,3
+scripts/train_boundary.sh --model r50 --variant bfp --gpus 2,3
 ```
 
 ## 6. 后台训练与日志
@@ -148,7 +193,7 @@ scripts/train_boundary.sh --model r50 --variant hrca --gpus 2,3
 如果你希望本地电脑关闭后服务器继续训练，直接用：
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca --background
+scripts/train_boundary.sh --model r50 --variant bfp --background
 ```
 
 脚本会输出：
@@ -160,7 +205,7 @@ scripts/train_boundary.sh --model r50 --variant hrca --background
 例如查看实时日志：
 
 ```bash
-tail -f logs/r50_hrca_gpu2_3_train_*.log
+tail -f logs/r50_bfp_gpu2_3_train_*.log
 ```
 
 查看训练进程：
@@ -180,17 +225,17 @@ nvidia-smi
 如果上一次训练目录里已经有 checkpoint：
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca --resume
+scripts/train_boundary.sh --model r50 --variant bfp --resume
 ```
 
 ## 8. 评估流程
 
-### 8.1 评估 HRCA 模型
+### 8.1 评估 BFP 模型
 
 ```bash
 scripts/train_boundary.sh \
   --model r50 \
-  --variant hrca \
+  --variant bfp \
   --mode eval \
   --weights output/model_final.pth
 ```
@@ -210,7 +255,7 @@ scripts/train_boundary.sh \
 ```bash
 scripts/train_boundary.sh \
   --model r50 \
-  --variant hrca \
+  --variant bfp \
   --mode eval \
   --weights output/model_final.pth \
   --gpus 2
@@ -218,34 +263,38 @@ scripts/train_boundary.sh \
 
 ## 9. 常用对比实验
 
-### 9.1 BEFBM vs HRCA
+### 9.1 BEFBM vs BFP
 
 保持 backbone 一致，只切换 `--variant`：
 
 ```bash
 scripts/train_boundary.sh --model r50 --variant befbm
-scripts/train_boundary.sh --model r50 --variant hrca
+scripts/train_boundary.sh --model r50 --variant bfp
 ```
 
-### 9.2 R50 vs R101
+### 9.2 R50 vs R101（BFP）
 
 保持模块一致，只切换 `--model`：
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca
-scripts/train_boundary.sh --model r101 --variant hrca
+scripts/train_boundary.sh --model r50 --variant bfp
+scripts/train_boundary.sh --model r101 --variant bfp
 ```
 
-### 9.3 调整 HRCA 稀疏度
+### 9.3 调整 BFP 传播方向
 
 通过附加 detectron2 配置项覆盖：
 
 ```bash
-scripts/train_boundary.sh --model r50 --variant hrca -- \
-  MODEL.MASK_FORMER.BOUNDARY_DECODER.TOPK_RATIO 64
+scripts/train_boundary.sh --model r50 --variant bfp -- \
+  MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.DIRECTIONS "['lr','rl']"
 ```
 
-`TOPK_RATIO` 越小，保留的高边界 token 越多，显存和计算也会更高。
+如果你仍需复现旧版 HRCA，对应命令保持不变：
+
+```bash
+scripts/train_boundary.sh --model r50 --variant hrca
+```
 
 ## 10. 输出兼容性
 
@@ -255,6 +304,7 @@ scripts/train_boundary.sh --model r50 --variant hrca -- \
 - 推理输出字段保持 baseline 兼容
 - 语义分割任务下推理结果仍为 `sem_seg`
 - `BOUNDARY_DECODER.ENABLED=False` 时可退回原始 `BEFBM + Mask2Former`
+- `BOUNDARY_PROPAGATION.ENABLED=False` 时可退回原始 `BEFBM + Mask2Former`
 
 ## 11. 代码入口
 

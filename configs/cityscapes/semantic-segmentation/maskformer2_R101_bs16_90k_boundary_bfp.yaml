@@ -1,0 +1,15 @@
+_BASE_: maskformer2_R101_bs16_90k_boundary.yaml
+MODEL:
+  MASK_FORMER:
+    BOUNDARY_PROPAGATION:
+      ENABLED: True
+      LEVELS: [0, 1, 2]
+      DIRECTIONS: ["lr", "rl", "tb", "bt"]
+      KERNEL_SIZE: 1
+      ALPHA: 20.0
+      GAMMA: 4.0
+      BETA_INIT: 1.0
+      FUSE: "sum"
+      RESIDUAL: True
+      NORM: "GN"
+      DEBUG: False

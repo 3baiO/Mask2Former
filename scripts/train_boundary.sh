@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="r50"
-VARIANT="hrca"
+VARIANT="bfp"
 MODE="train"
 GPUS="2,3"
 IMS_PER_BATCH=""
@@ -26,7 +26,7 @@ Usage:
 
 Options:
   --model <r50|r101>           Backbone preset. Default: r50
-  --variant <befbm|hrca>       Experiment preset. Default: hrca
+  --variant <befbm|bfp|hrca>   Experiment preset. Default: bfp
   --mode <train|eval>          Run training or eval-only. Default: train
   --gpus <ids>                 CUDA_VISIBLE_DEVICES, e.g. "2" or "2,3"
   --ims-per-batch <int>        Override SOLVER.IMS_PER_BATCH
@@ -42,7 +42,7 @@ Options:
 Examples:
   scripts/train_boundary.sh
   scripts/train_boundary.sh --variant befbm --gpus 2
-  scripts/train_boundary.sh --model r101 --variant hrca --background
+  scripts/train_boundary.sh --model r101 --variant bfp --background
   scripts/train_boundary.sh --mode eval --weights output/model_final.pth
 EOF
 }
@@ -119,7 +119,7 @@ if [[ "$MODEL" != "r50" && "$MODEL" != "r101" ]]; then
   exit 2
 fi
 
-if [[ "$VARIANT" != "befbm" && "$VARIANT" != "hrca" ]]; then
+if [[ "$VARIANT" != "befbm" && "$VARIANT" != "bfp" && "$VARIANT" != "hrca" ]]; then
   echo "Unsupported --variant: $VARIANT" >&2
   exit 2
 fi
@@ -144,6 +144,11 @@ case "$MODEL:$VARIANT" in
     DEFAULT_IMS_PER_BATCH="4"
     DEFAULT_BASE_LR="0.00005"
     ;;
+  r50:bfp)
+    CONFIG="configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary_bfp.yaml"
+    DEFAULT_IMS_PER_BATCH="4"
+    DEFAULT_BASE_LR="0.00005"
+    ;;
   r50:hrca)
     CONFIG="configs/cityscapes/semantic-segmentation/maskformer2_R50_bs16_90k_boundary_hrca.yaml"
     DEFAULT_IMS_PER_BATCH="4"
@@ -151,6 +156,11 @@ case "$MODEL:$VARIANT" in
     ;;
   r101:befbm)
     CONFIG="configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary.yaml"
+    DEFAULT_IMS_PER_BATCH="4"
+    DEFAULT_BASE_LR="0.00005"
+    ;;
+  r101:bfp)
+    CONFIG="configs/cityscapes/semantic-segmentation/maskformer2_R101_bs16_90k_boundary_bfp.yaml"
     DEFAULT_IMS_PER_BATCH="4"
     DEFAULT_BASE_LR="0.00005"
     ;;

@@ -246,6 +246,17 @@ class MaskFormer(nn.Module):
                             float(alpha.max().detach()),
                             float(alpha.mean().detach()),
                         )
+                if "boundary_prop_confidences" in outputs:
+                    for level_idx, confidence in enumerate(outputs["boundary_prop_confidences"]):
+                        if confidence is None:
+                            continue
+                        self.logger.info(
+                            "Boundary propagation confidence level %d: min=%.6f max=%.6f mean=%.6f",
+                            level_idx,
+                            float(confidence.min().detach()),
+                            float(confidence.max().detach()),
+                            float(confidence.mean().detach()),
+                        )
                 loss_cls = float(losses["loss_ce"].detach()) if "loss_ce" in losses else 0.0
                 loss_mask = float(losses["loss_mask"].detach()) if "loss_mask" in losses else 0.0
                 loss_dice = float(losses["loss_dice"].detach()) if "loss_dice" in losses else 0.0

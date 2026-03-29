@@ -16,7 +16,11 @@ from detectron2.modeling import SEM_SEG_HEADS_REGISTRY
 
 from ..transformer_decoder.position_encoding import PositionEmbeddingSine
 from ..transformer_decoder.transformer import _get_clones, _get_activation_fn
-from .boundary_aware import FeatureBridgingModule, SobelBoundaryExtractor
+from .boundary_aware import (
+    BoundaryFeaturePropagation,
+    FeatureBridgingModule,
+    SobelBoundaryExtractor,
+)
 from .ops.modules import MSDeformAttn
 
 
@@ -182,6 +186,17 @@ class MSDeformAttnPixelDecoder(nn.Module):
         boundary_aware_enabled: bool = False,
         boundary_to_grayscale: bool = True,
         boundary_normalize: bool = True,
+        boundary_propagation_enabled: bool = False,
+        boundary_propagation_levels: Optional[List[int]] = None,
+        boundary_propagation_directions: Optional[List[str]] = None,
+        boundary_propagation_kernel_size: int = 1,
+        boundary_propagation_alpha: float = 20.0,
+        boundary_propagation_gamma: float = 4.0,
+        boundary_propagation_beta_init: float = 1.0,
+        boundary_propagation_fuse: str = "sum",
+        boundary_propagation_residual: bool = True,
+        boundary_propagation_norm: str = "GN",
+        boundary_propagation_debug: bool = False,
     ):
         """
         NOTE: this interface is experimental.
@@ -296,6 +311,8 @@ class MSDeformAttnPixelDecoder(nn.Module):
         self.output_convs = output_convs[::-1]
 
         self.boundary_aware_enabled = boundary_aware_enabled
+        self.boundary_propagation_enabled = boundary_aware_enabled and boundary_propagation_enabled
+        self.boundary_propagation_debug = boundary_propagation_debug
         if self.boundary_aware_enabled:
             self.boundary_extractor = SobelBoundaryExtractor(
                 to_grayscale=boundary_to_grayscale,
@@ -317,10 +334,32 @@ class MSDeformAttnPixelDecoder(nn.Module):
             for predictor in self.boundary_predictors:
                 nn.init.xavier_uniform_(predictor.weight, gain=1)
                 nn.init.constant_(predictor.bias, 0)
+            valid_levels = set(range(self.maskformer_num_feature_levels))
+            if boundary_propagation_levels is None:
+                boundary_propagation_levels = list(valid_levels)
+            self.boundary_propagation_levels = sorted(
+                level for level in boundary_propagation_levels if level in valid_levels
+            )
+            self.boundary_propagation_modules = nn.ModuleDict()
+            if self.boundary_propagation_enabled:
+                for level in self.boundary_propagation_levels:
+                    self.boundary_propagation_modules[str(level)] = BoundaryFeaturePropagation(
+                        channels=conv_dim,
+                        directions=boundary_propagation_directions or ["lr", "rl", "tb", "bt"],
+                        kernel_size=boundary_propagation_kernel_size,
+                        alpha=boundary_propagation_alpha,
+                        gamma=boundary_propagation_gamma,
+                        beta_init=boundary_propagation_beta_init,
+                        fuse=boundary_propagation_fuse,
+                        residual=boundary_propagation_residual,
+                        norm=boundary_propagation_norm,
+                    )
         else:
             self.boundary_extractor = None
             self.feature_bridges = nn.ModuleList()
             self.boundary_predictors = nn.ModuleList()
+            self.boundary_propagation_levels = []
+            self.boundary_propagation_modules = nn.ModuleDict()
 
     @classmethod
     def from_config(cls, cfg, input_shape: Dict[str, ShapeSpec]):
@@ -343,6 +382,17 @@ class MSDeformAttnPixelDecoder(nn.Module):
         ret["boundary_aware_enabled"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.ENABLED
         ret["boundary_to_grayscale"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.TO_GRAYSCALE
         ret["boundary_normalize"] = cfg.MODEL.MASK_FORMER.BOUNDARY_AWARE.NORMALIZE
+        ret["boundary_propagation_enabled"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.ENABLED
+        ret["boundary_propagation_levels"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.LEVELS
+        ret["boundary_propagation_directions"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.DIRECTIONS
+        ret["boundary_propagation_kernel_size"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.KERNEL_SIZE
+        ret["boundary_propagation_alpha"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.ALPHA
+        ret["boundary_propagation_gamma"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.GAMMA
+        ret["boundary_propagation_beta_init"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.BETA_INIT
+        ret["boundary_propagation_fuse"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.FUSE
+        ret["boundary_propagation_residual"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.RESIDUAL
+        ret["boundary_propagation_norm"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.NORM
+        ret["boundary_propagation_debug"] = cfg.MODEL.MASK_FORMER.BOUNDARY_PROPAGATION.DEBUG
         return ret
 
     @autocast(enabled=False)
@@ -413,6 +463,22 @@ class MSDeformAttnPixelDecoder(nn.Module):
                 predictor(z_feature)
                 for predictor, z_feature in zip(self.boundary_predictors, boundary_z_features)
             ]
+            propagated_features = None
+            propagation_confidences = None
+            if self.boundary_propagation_enabled:
+                propagated_features = list(boundary_z_features)
+                propagation_confidences = [None] * len(boundary_z_features)
+                for level in self.boundary_propagation_levels:
+                    propagated_feature, propagation_confidence = self.boundary_propagation_modules[str(level)](
+                        propagated_features[level],
+                        boundary_preds[level],
+                        return_confidence=True,
+                    )
+                    propagated_features[level] = propagated_feature
+                    propagation_confidences[level] = propagation_confidence
+                multi_scale_features = propagated_features
+                boundary_z_features = propagated_features
+
             boundary_maps = None
             if self.training and images is not None:
                 target_sizes = [tuple(z.shape[-2:]) for z in boundary_z_features]
@@ -424,6 +490,9 @@ class MSDeformAttnPixelDecoder(nn.Module):
                 "boundary_maps": boundary_maps,
                 "boundary_alphas": bridge_alphas,
             }
+            if propagated_features is not None:
+                boundary_info["boundary_prop_features"] = propagated_features
+                boundary_info["boundary_prop_confidences"] = propagation_confidences
             return mask_features, out[0], multi_scale_features, boundary_info
 
         return mask_features, out[0], multi_scale_features
